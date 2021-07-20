@@ -1,9 +1,10 @@
 from ast import Str
 from io import BufferedReader, SEEK_SET
 from operator import sub
+import struct
 from typing import Any, List
 from construct import *
-from construct.core import Int16ul, Int32sl, Int32ul, Int64ul, evaluate
+from construct.core import Int16ul, Int32sl, Int32ul, Int64ul, Int8ul, evaluate, Int8sl, Int16sl, Int64sl, Float32l, Float64l
 
 from dataclasses import dataclass
 import sys
@@ -76,7 +77,7 @@ ClassMemberDefinition = Struct(
     "type" / Byte,
     "unkn" / Byte,
     "size" / Byte,
-    "_unknData" / Default(Byte[69], [0 for _ in range(69)]),
+    "_unknData" / Default(Byte[37], [0 for _ in range(37)]),
 )
 
 ClassDefinition = DataPointer(
@@ -110,17 +111,17 @@ def varHandling(this):
     varcount += 1
     return ret
 
+
 def ClassEntry_(): 
     return Struct(
-        "CLASS_ID" / Int16ul,
-        "_valid" / Computed(lambda this: this.CLASS_ID // 2 < len(this._root.defs)),
-        "_var" / IfThenElse(
-            this._valid,
-            Rebuild(Int16ul, varHandling),
-            Default(Int16ul, 0)),
-        "content" / If(this._valid,
+        "_type" / Int16ul,
+        "isInstance" / Computed(lambda this: this._type & 1),
+        "Class_Index" / Computed(lambda this: this._type >> 1),
+        "_valid" / Computed(lambda this: this._type < len(this._root.defs)),
+        "index" / Int16ul,
+        "content" / If(this.isInstance,
             LazyBound(lambda: PrefixedOffset(
-                Int64ul, ClassImplementation(this._._.CLASS_ID // 2), -8))
+                Int64ul, ClassImplementation(this._._.Class_Index), -8))
            )
     )
 
@@ -135,10 +136,15 @@ class ClassEntry(Adapter):
         return obj
     
     def _encode(self, obj, context, path):
-        ret = {"CLASS_ID": obj.CLASS_ID, "content": obj}
-        ret["content"].pop("CLASS_ID")
+        if obj.isInstance:
+            global varcount
+            varcount += 1
+            print(len(obj))
+            print(obj)
+        ret = {"_type": obj.isInstance+(obj.Class_Index<<1) , "content": obj}
+        ret["content"].pop("isInstance")
+        ret["content"].pop("Class_Index")
         return ret
-        
 
 def ClassImpl(id):
   return FocusedSeq("classes",
@@ -202,6 +208,12 @@ def Quat4():
         "z" / Float32l,
         "w" / Float32l)
 
+def Vector2():
+    return Struct(
+        "u" / Float32l,
+        "v" / Float32l
+    )
+
 def DataEntry(type):
     return FocusedSeq("values",
         "_count" / Rebuild(Int32ul, len_(this.values)),
@@ -210,7 +222,7 @@ def DataEntry(type):
             1: ClassEntry(),
             2: ClassEntry(),
             3: Byte, #boolean
-            4: Byte,
+            4: Int8ul,
             5: Int16ul,
             6: Int32ul,
             7: Int64ul,
@@ -223,9 +235,12 @@ def DataEntry(type):
             14: CString("utf8"),
             15: RGBA(),
             16: Int64ul, #pointer
+            #17: Int32ul #size, potentially not a uint but that's probably the best option of it
             20: Vector3(),
             21: Vector4(),
-            22: Quat4()
+            22: Quat4(),
+            32: CString('utf8'), #specifically a CString, while 14 is probably something like std::string
+            64: Vector2()
         }, default=StopFieldError)[this._count],
     )
 
