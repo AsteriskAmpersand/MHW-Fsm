@@ -3,32 +3,42 @@ from io import BufferedReader, SEEK_SET
 from operator import sub
 import struct
 from typing import Any, List
-from construct import *
-from construct.core import Int16ul, Int32sl, Int32ul, Int64ul, Int8ul, evaluate, Int8sl, Int16sl, Int64sl, Float32l, Float64l
+import construct as C
+from construct.core import (Int16ul, Float32l, Int32sl, Int32ul, 
+                            Float64l, Int64ul, 
+                            Int8ul, Int8sl, Int16sl, Int64sl,
+                            Byte, CString, Pass,
+                            evaluate, this, Struct,
+                            )
 
 from dataclasses import dataclass
 import sys
 import json
 
+def stream_tell(stream,path):
+    return C.stream_tell(stream)
+
+def stream_seek(stream,offset,whence,path):
+    C.stream_seek(stream,offset,whence)
 
 # Queued Pointer Handling
 
 @dataclass
 class PointerQueuedData:
     pointerOffset: int
-    pointerType: Construct
+    pointerType: C.Construct
     data: Any
-    dataType: Construct
+    dataType: C.Construct
 
-class DataPointer(Subconstruct): 
-    def __init__(self, subcon: Construct, pointed: Construct, tag: str = "ptrData"):
+class DataPointer(C.Subconstruct): 
+    def __init__(self, subcon: C.Construct, pointed: C.Construct, tag: str = "ptrData"):
         super().__init__(subcon)
         self.pointed = pointed
         self.tag = tag
     
     def _parse(self, stream, context, path):
         ptrVal = super()._parse(stream, context, path)
-        return Pointer(ptrVal, self.pointed)._parse(stream, context, path)
+        return C.Pointer(ptrVal, self.pointed)._parse(stream, context, path)
     
     def _build(self, obj, stream, context, path):
         if self.tag not in context._params:
@@ -37,7 +47,7 @@ class DataPointer(Subconstruct):
         super()._build(0, stream, context, path)
         return obj
 
-class DataEntries(Construct):
+class DataEntries(C.Construct):
     def __init__(self, tag: str = "ptrData"):
         super().__init__()
         self.tag = tag
@@ -61,13 +71,13 @@ class DataEntries(Construct):
 
 
 def PrefixedOffset(sizetype, type, offs = 0):  
-    return FocusedSeq("content",
-        "_data" / Rebuild(Struct(
-            "size" / Rebuild(sizetype, len_(this.data) - offs),
-            "data" / Bytes(this.size + offs)
+    return C.FocusedSeq("content",
+        "_data" / C.Rebuild(C.Struct(
+            "size" / C.Rebuild(sizetype, C.len_(this.data) - offs),
+            "data" / C.Bytes(this.size + offs)
         ), lambda obj: {"data": type.build(obj.content, **{**obj._params, **obj})}),
 
-        "content" / RestreamData(this._data.data, type)
+        "content" / C.RestreamData(this._data.data, type)
     )
 
 # Class definition handling
@@ -77,25 +87,25 @@ ClassMemberDefinition = Struct(
     "type" / Byte,
     "unkn" / Byte,
     "size" / Byte,
-    "_unknData" / Default(Byte[37], [0 for _ in range(37)]),
+    "_unknData" / C.Default(Byte[37], [0 for _ in range(37)]),
 )
 
 ClassDefinition = DataPointer(
     Int64ul,
     Struct(
         "hash" / Int64ul,
-        "members" / PrefixedArray(Int64ul, ClassMemberDefinition)
+        "members" / C.PrefixedArray(Int64ul, ClassMemberDefinition)
     ),
     "definitionData")
 
-ClassDefinitionList = FocusedSeq(
+ClassDefinitionList = C.FocusedSeq(
     "definitions",
-    "_count" / Rebuild(Int32ul, len_(this.definitions)),
-    "definitions" / Prefixed(
+    "_count" / C.Rebuild(Int32ul, C.len_(this.definitions)),
+    "definitions" / C.Prefixed(
         Int32ul,
-        Aligned(
+        C.Aligned(
             8,
-            FocusedSeq("definitions",
+            C.FocusedSeq("definitions",
                        "definitions" /
                        ClassDefinition[this._._count],
                        DataEntries("definitionData"),
@@ -115,17 +125,17 @@ def varHandling(this):
 def ClassEntry_(): 
     return Struct(
         "_type" / Int16ul,
-        "isInstance" / Computed(lambda this: this._type & 1),
-        "Class_Index" / Computed(lambda this: this._type >> 1),
-        "_valid" / Computed(lambda this: this._type < len(this._root.defs)),
+        "isInstance" / C.Computed(lambda this: this._type & 1),
+        "Class_Index" / C.Computed(lambda this: this._type >> 1),
+        "_valid" / C.Computed(lambda this: this._type < len(this._root.defs)),
         "index" / Int16ul,
-        "content" / If(this.isInstance,
-            LazyBound(lambda: PrefixedOffset(
+        "content" / C.If(this.isInstance,
+            C.LazyBound(lambda: PrefixedOffset(
                 Int64ul, ClassImplementation(this._._.Class_Index), -8))
            )
     )
 
-class ClassEntry(Adapter):
+class ClassEntry(C.Adapter):
     def __init__(self):
         super().__init__(ClassEntry_())
     
@@ -139,27 +149,30 @@ class ClassEntry(Adapter):
         if obj.isInstance:
             global varcount
             varcount += 1
-            print(len(obj))
-            print(obj)
-        ret = {"_type": obj.isInstance+(obj.Class_Index<<1) , "content": obj}
+            #print(len(obj))
+            #print(obj)
+        ret = {"_type": obj.isInstance+(obj.Class_Index<<1) ,
+               "index": obj.index,
+               "content": obj}
         ret["content"].pop("isInstance")
         ret["content"].pop("Class_Index")
+        ret["content"].pop("index")
         return ret
 
 def ClassImpl(id):
-  return FocusedSeq("classes",
-      "_class" / Computed(lambda this: this._root.defs[evaluate(id, this)]),
-      "classes" / FocusedSeq("entries",
-          "_index" / Index,
-          "_member" / Computed(lambda this: this._._class.members[this._index]),
-          "entries" / Sequence(
-              Computed(this._._member.name),
+  return C.FocusedSeq("classes",
+      "_class" / C.Computed(lambda this: this._root.defs[evaluate(id, this)]),
+      "classes" / C.FocusedSeq("entries",
+          "_index" / C.Index,
+          "_member" / C.Computed(lambda this: this._._class.members[this._index]),
+          "entries" / C.Sequence(
+              C.Computed(this._._member.name),
               DataEntry(lambda this: this._._._member.type)
           )
-      )[len_(this._class.members)]
+      )[C.len_(this._class.members)]
   )
 
-class ClassImplementation(Adapter):
+class ClassImplementation(C.Adapter):
     def __init__(self, id):
         super().__init__(ClassImpl(id))
 
@@ -215,9 +228,9 @@ def Vector2():
     )
 
 def DataEntry(type):
-    return FocusedSeq("values",
-        "_count" / Rebuild(Int32ul, len_(this.values)),
-        "values" / Switch(type, {
+    return C.FocusedSeq("values",
+        "_count" / C.Rebuild(Int32ul, C.len_(this.values)),
+        "values" / C.Switch(type, {
             0: Pass,
             1: ClassEntry(),
             2: ClassEntry(),
@@ -241,7 +254,7 @@ def DataEntry(type):
             22: Quat4(),
             32: CString('utf8'), #specifically a CString, while 14 is probably something like std::string
             64: Vector2()
-        }, default=StopFieldError)[this._count],
+        }, default=C.StopFieldError)[this._count],
     )
 
 
@@ -250,15 +263,15 @@ Header = Struct(
     "sig" / Byte[4],
     "version" / Int16ul,
     "type" / Int16ul,
-    "_classCountPos" / Tell,
-    "_classCount" / Rebuild(Int64ul, lambda _: 0),
+    "_classCountPos" / C.Tell,
+    "_classCount" / C.Rebuild(Int64ul, lambda _: 0),
 )
 
 topLevel = Struct(
     "header" / Header,
     "defs" / ClassDefinitionList,
     "root" / ClassEntry(),
-    Pointer(this.header._classCountPos, Rebuild(Int64ul, varHandling))
+    C.Pointer(this.header._classCountPos, C.Rebuild(Int64ul, varHandling))
 )
 
 
@@ -276,9 +289,9 @@ def filterVariables(node):
 
 def importToContainer(node):
     if isinstance(node, dict):
-        return Container({k: importToContainer(v) for (k, v) in node.items()})
+        return C.Container({k: importToContainer(v) for (k, v) in node.items()})
     if isinstance(node, list):
-        return ListContainer(importToContainer(i) for i in node)
+        return C.ListContainer(importToContainer(i) for i in node)
     return node
 
     
@@ -300,7 +313,7 @@ def decode(path):
         json.dump(main_dict, f, cls=Encoder, indent=True, ensure_ascii=False)
 
 def encode(path):
-    with open(path, 'r', encoding="utf8") as f:
+    with open(path, 'r', encoding="utf-8") as f:
         main_dict = json.load(f)
     main_dict = importToContainer(main_dict)
     with open(path[:-5], 'wb') as f:
